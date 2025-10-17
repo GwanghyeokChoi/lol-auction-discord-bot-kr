@@ -37,29 +37,29 @@ class BidPanel(View):
         self._amount = new
         await interaction.response.edit_message(view=self._render())
 
-    @discord.ui.button(label="-100", style=discord.ButtonStyle.secondary, row=0)
-    async def dec100(self, interaction: discord.Interaction, button: Button):
-        await self._adjust_bid(interaction, -self.step * 10)
-
-    @discord.ui.button(label="-50", style=discord.ButtonStyle.secondary, row=0)
-    async def dec50(self, interaction: discord.Interaction, button: Button):
-        await self._adjust_bid(interaction, -self.step * 5)
-
-    @discord.ui.button(label="-10", style=discord.ButtonStyle.secondary, row=0)
-    async def dec10(self, interaction: discord.Interaction, button: Button):
-        await self._adjust_bid(interaction, -self.step)
-
-    @discord.ui.button(label="+10", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="+10", style=discord.ButtonStyle.secondary, row=0)
     async def inc10(self, interaction: discord.Interaction, button: Button):
         await self._adjust_bid(interaction, self.step)
 
-    @discord.ui.button(label="+50", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="+50", style=discord.ButtonStyle.secondary, row=0)
     async def inc50(self, interaction: discord.Interaction, button: Button):
         await self._adjust_bid(interaction, self.step * 5)
 
-    @discord.ui.button(label="+100", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="+100", style=discord.ButtonStyle.secondary, row=0)
     async def inc100(self, interaction: discord.Interaction, button: Button):
         await self._adjust_bid(interaction, self.step * 10)
+
+    @discord.ui.button(label="-100", style=discord.ButtonStyle.secondary, row=1)
+    async def dec100(self, interaction: discord.Interaction, button: Button):
+        await self._adjust_bid(interaction, -self.step * 10)
+
+    @discord.ui.button(label="-50", style=discord.ButtonStyle.secondary, row=1)
+    async def dec50(self, interaction: discord.Interaction, button: Button):
+        await self._adjust_bid(interaction, -self.step * 5)
+
+    @discord.ui.button(label="-10", style=discord.ButtonStyle.secondary, row=1)
+    async def dec10(self, interaction: discord.Interaction, button: Button):
+        await self._adjust_bid(interaction, -self.step)
 
     @discord.ui.button(label="입찰 확정", style=discord.ButtonStyle.success, row=2)
     async def confirm(self, interaction: discord.Interaction, button: Button):
