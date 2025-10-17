@@ -75,15 +75,12 @@ class AuctionCog(commands.Cog, name="Auction"):
                 f"본인 차례에만 가능. 최소 {base_bid}P, {bid_step}P 단위, 잔여 포인트 이내."
             ),
             "패스": (
-                "!패스",
                 "이번 라운드 입찰을 건너뜁니다. 모두 패스 + 최고입찰자 없음이면 유찰."
             ),
             "퍼즈": (
-                f"!퍼즈",
                 f"경매 일시정지. 팀장당 {pause_cnt}회, 1회 최대 {pause_sec//60}분."
             ),
             "퍼즈 종료": (
-                "!퍼즈 종료",
                 "퍼즈를 건 팀장만 해제할 수 있습니다."
             ),
             "조회 참가자": (
@@ -513,46 +510,6 @@ class AuctionCog(commands.Cog, name="Auction"):
 
         text = "\n".join(lines)
         await ctx.send(text[:1900] if text else "결과가 없습니다.")
-        
-    # ───────────────────────── 퍼즈/유찰 ─────────────────────────
-    @commands.command(name="퍼즈")
-    async def pause_cmd(self, ctx: commands.Context, *args):
-        """
-        !퍼즈           → (현재 차례인) 본인 팀장으로 퍼즈 시작
-        !퍼즈 종료      → 본인이 건 퍼즈 해제 (공백 포함해도 동작)
-        """
-        # 공백 포함 "퍼즈 종료"를 처리 (ex: "!퍼즈 종료")
-        if args and args[0] in ("종료", "해제", "end", "resume"):
-            # 퍼즈 해제는 '퍼즈를 건 팀장'만 가능
-            owner_nick = self.service.state.pause_owner
-            if owner_nick and self._author_matches_nick(ctx, owner_nick):
-                self.service.state.paused_until = None
-                self.service.state.pause_owner = None
-                return await ctx.send("▶️ 퍼즈 해제!")
-            return await ctx.send("퍼즈를 건 팀장만 해제할 수 있어요.")
-
-        # 퍼즈 시작 로직
-        if not self.service.state.started:
-            return await ctx.send("경매가 시작되지 않았습니다.")
-
-        # 현재 차례 팀장 닉
-        c_nick = self.service.state.captain_order[self.service.state.current_captain_idx]
-
-        # 발신자가 현재 차례 팀장인지(매핑 우선) 확인
-        if not self._author_matches_nick(ctx, c_nick):
-            return await ctx.send("현재 차례인 팀장만 퍼즈 사용 가능.")
-
-        cap = self.service.state.captains[c_nick]
-        if self.service.state.pause_owner and self.service.state.pause_owner != c_nick:
-            return await ctx.send("이미 누군가 퍼즈 중입니다.")
-        if cap.pause_used >= CFG.PAUSE_MAX_PER_CAPTAIN:
-            return await ctx.send("퍼즈 횟수를 모두 사용했습니다.")
-
-        cap.pause_used += 1
-        self.service.state.pause_owner = c_nick
-        import datetime
-        self.service.state.paused_until = datetime.datetime.utcnow() + datetime.timedelta(seconds=CFG.PAUSE_MAX_DURATION_SEC)
-        await ctx.send(f"⏸️ {c_nick} 퍼즈! 최대 {CFG.PAUSE_MAX_DURATION_SEC//60}분. `!퍼즈 종료`로 조기 해제.")
 
     # ───────────────────────── 결과 내보내기 ─────────────────────────
     @commands.command(name="파일")
