@@ -72,7 +72,6 @@ class AuctionCog(commands.Cog, name="Auction"):
                 f"경매를 시작합니다. 최소입찰 {base_bid}P, 단위 {bid_step}P, 턴 제한 {turn_sec}초."
             ),
             "입찰": (
-                f"!입찰 <포인트>",
                 f"본인 차례에만 가능. 최소 {base_bid}P, {bid_step}P 단위, 잔여 포인트 이내."
             ),
             "패스": (
@@ -124,7 +123,7 @@ class AuctionCog(commands.Cog, name="Auction"):
                 "③ (선택) 팀장-계정 바인딩: `!팀장 연결 <팀장닉네임>` — 내 차례에 **버튼 UI**로 입찰/패스/퍼즈 가능",
                 "④ 경매 시작: `!경매 시작 <팀수> <초기포인트>`  예) `!경매 시작 3 1000`",
                 "",
-                f"입찰: `!입찰 <포인트>` — 최소 {base_bid}P, {bid_step}P 단위, 턴당 {turn_sec}초",
+                f"입찰: 최소 {base_bid}P, {bid_step}P 단위, 턴당 {turn_sec}초",
                 "`!패스` — 이번 라운드 건너뛰기",
                 f"`!퍼즈` / `!퍼즈 종료` — 팀장당 {pause_cnt}회, 1회 최대 {pause_sec//60}분",
                 f"전략 타임 — 모든 팀장에게 1명 이상 영입되면 {strategy_min}분 1회",
@@ -135,7 +134,7 @@ class AuctionCog(commands.Cog, name="Auction"):
                 "`!팀장 등록 팀명;이름;닉;티어;주;부;모스트1[;모스트2][;모스트3]`",
                 "`!팀장 연결 <팀장닉네임>` — 내 디스코드 계정을 팀장 닉으로 바인딩",
                 "바인딩 후 내 차례에 **버튼 UI**가 표시되어 금액 증감/입찰/패스/퍼즈를 버튼으로 선택할 수 있습니다.",
-                "바인딩이 없더라도 `!입찰 100` 같은 텍스트 입력으로는 참여 가능합니다(하위 호환).",
+                "팀장 연결을 하지 않은 경우, 경매 참여가 불가능합니다. 참고 부탁드립니다."
             ]),
             "경매자": ("경매자 등록", [
                 "`!경매자 등록` + CSV 첨부 (권장)",
@@ -564,19 +563,6 @@ class AuctionCog(commands.Cog, name="Auction"):
             self.service.state.pause_owner = None
             return await ctx.send("▶️ 퍼즈 해제!")
         await ctx.send("퍼즈를 건 팀장만 해제할 수 있어요.")
-
-    @commands.command(name="유찰")
-    async def force_fail(self, ctx: commands.Context):
-        if not self.service.state.started:
-            return await ctx.send("경매가 시작되지 않았습니다.")
-        if 0 <= self.service.state.current_player_idx < len(self.service.state.player_order):
-            p_nick = self.service.state.player_order[self.service.state.current_player_idx]
-            p = self.service.state.players.get(p_nick)
-            if p:
-                p.status = "유찰"
-                await ctx.send(f"⚪ **{p.nickname}** 유찰 처리.")
-        else:
-            await ctx.send("현재 진행 중인 경매자가 없습니다.")
 
     # ───────────────────────── 결과 내보내기 ─────────────────────────
     @commands.command(name="파일")
