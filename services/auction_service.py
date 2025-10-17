@@ -119,7 +119,7 @@ class AuctionService:
                 if not self.state.strategy_called and self.state.everyone_has_member():
                     self.state.strategy_called = True
                     await ctx.send(f"📣 모든 팀장에게 팀원이 1명 이상! 전략 타임 {CFG.STRATEGY_TIME_MINUTES}분 시작.")
-                    await asyncio.sleep(CFG.STRATEGY_TIME_MINUTES * 60)
+                    await asyncio.sleep(CFG.STRATEGY_TIME_MINUTES)
                     await ctx.send("전략 타임 종료, 경매 재개!")
 
                 # 다음 플레이어 전 대기
@@ -335,13 +335,39 @@ class AuctionService:
     def export_csv_bytes(self) -> bytes:
         out = io.StringIO()
         writer = csv.writer(out)
-        writer.writerow(["팀명", "팀장닉네임", "팀원닉네임", "낙찰가"])
+        writer.writerow(["팀명", "이름", "닉네임", "주 라인", "부 라인", "모스트", "포인트"])
+
         for c_nick, team in self.state.teams.items():
             cap = self.state.captains.get(c_nick)
-            for mn in team.members:
+            team_name = getattr(cap, "team_name", "") if cap else ""
+
+            for mn in team.members:  # mn = 팀원 닉네임(문자열)
                 p = self.state.players.get(mn)
-                price = p.won_price if p else ""
-                writer.writerow([cap.team_name if cap else "", c_nick, mn, price])
+                if not p:
+                    # 혹시 일관성 깨졌을 때도 한 줄은 쓰고 넘어가도록
+                    writer.writerow([team_name, "", mn, "", "", "", ""])
+                    continue
+
+                # 필드명 혼용 안전 처리
+                real_name = getattr(p, "name", "")
+                nickname = getattr(p, "nickname", mn)
+
+                main_pos = getattr(p, "main_p", getattr(p, "main_pos", ""))
+                sub_pos  = getattr(p, "sub_p",  getattr(p, "sub_pos",  ""))
+
+                # 모스트 필드 다양한 이름 대응
+                most_vals = [
+                    getattr(p, "m1", None) or getattr(p, "most1", None),
+                    getattr(p, "m2", None) or getattr(p, "most2", None),
+                    getattr(p, "m3", None) or getattr(p, "most3", None),
+                ]
+                # None/빈값 제거 후 ", "로 연결
+                most_joined = ", ".join([m for m in most_vals if m])
+
+                price = getattr(p, "won_price", "") or ""
+
+                writer.writerow([team_name, real_name, nickname, main_pos, sub_pos, most_joined, price])
+
         return out.getvalue().encode("utf-8-sig")
         
     def bind_captain_user(self, user_id: int, captain_nick: str):
