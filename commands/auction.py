@@ -554,16 +554,6 @@ class AuctionCog(commands.Cog, name="Auction"):
         self.service.state.paused_until = datetime.datetime.utcnow() + datetime.timedelta(seconds=CFG.PAUSE_MAX_DURATION_SEC)
         await ctx.send(f"⏸️ {c_nick} 퍼즈! 최대 {CFG.PAUSE_MAX_DURATION_SEC//60}분. `!퍼즈 종료`로 조기 해제.")
 
-    @commands.command(name="퍼즈종료")
-    async def unpause_cmd(self, ctx: commands.Context):
-        """기존 호환: !퍼즈종료 → !퍼즈 종료와 동일 동작"""
-        owner_nick = self.service.state.pause_owner
-        if owner_nick and self._author_matches_nick(ctx, owner_nick):
-            self.service.state.paused_until = None
-            self.service.state.pause_owner = None
-            return await ctx.send("▶️ 퍼즈 해제!")
-        await ctx.send("퍼즈를 건 팀장만 해제할 수 있어요.")
-
     # ───────────────────────── 결과 내보내기 ─────────────────────────
     @commands.command(name="파일")
     async def export_cmd(self, ctx: commands.Context, sub: str = None):
