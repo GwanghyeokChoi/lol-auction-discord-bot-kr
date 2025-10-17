@@ -298,7 +298,7 @@ class AuctionService:
                         captain.pause_used += 1
                         self.state.pause_owner = c_nick
                         self.state.paused_until = datetime.datetime.utcnow() + datetime.timedelta(seconds=CFG.PAUSE_MAX_DURATION_SEC)
-                        await ctx.send(f"⏸️ {c_nick} 퍼즈! 최대 5분. `!퍼즈 종료`로 조기 해제.")
+                        await ctx.send(f"⏸️ {c_nick} 퍼즈! 최대 {pause_sec//60}분. `!퍼즈 종료`로 조기 해제.")
 
                 elif action == "timeout":
                     action = "pass"
