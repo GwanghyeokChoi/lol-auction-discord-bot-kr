@@ -172,7 +172,7 @@ class AuctionService:
 
                 # 팀 인원 제한 → 참여 스킵
                 if not team.can_add():
-                    await ctx.send(f"{c_nick} 팀은 인원 제한으로 이번 경매 참여 불가.")
+                    await ctx.send(f"{self.mention_for_captain(c_nick)} 팀은 인원 제한으로 이번 경매 참여 불가.")
                     self.state.current_captain_idx = (self.state.current_captain_idx + 1) % len(self.state.captain_order)
                     continue
 
@@ -225,14 +225,14 @@ class AuctionService:
                         result_future=result_future,
                     )
                     prompt_msg = await ctx.send(
-                        f"배팅 차례: **{c_nick}** (잔여 {captain.remain_pts}) — 아래 버튼으로 ‘본인만’ 에페메랄 패널을 열 수 있습니다.",
+                        f"배팅 차례: {self.mention_for_captain(c_nick)} (잔여 {captain.remain_pts}) — 아래 버튼으로 ‘본인만’ 에페메랄 패널을 열 수 있습니다.",
                         view=launcher
                     )
                     try:
                         action, amount = await asyncio.wait_for(result_future, timeout=CFG.TURN_BID_TIMEOUT_SEC)
                     except asyncio.TimeoutError:
                         action, amount = "pass", None
-                        await ctx.send(f"⏱️ {c_nick} 시간 초과로 자동 패스.")
+                        await ctx.send(f"⏱️ {self.mention_for_captain(c_nick)} 시간 초과로 자동 패스.")
                     # 런처 비활성
                     try:
                         for ch in launcher.children:
@@ -244,7 +244,7 @@ class AuctionService:
                 else:
                     # 텍스트 폴백
                     await ctx.send(
-                        f"배팅 차례: **{c_nick}** (잔여 {captain.remain_pts}) — "
+                        f"배팅 차례: {self.mention_for_captain(c_nick)} (잔여 {captain.remain_pts}) — "
                         f"`!입찰 <포인트>` / `!패스` / `!퍼즈` ({CFG.TURN_BID_TIMEOUT_SEC}초)\n"
                         "※ `!팀장 연결 <팀장닉네임>`으로 바인딩하면 버튼(에페메랄) UI를 사용할 수 있어요."
                     )
@@ -287,13 +287,13 @@ class AuctionService:
                                 captain.pause_used += 1
                                 self.state.pause_owner = c_nick
                                 self.state.paused_until = datetime.datetime.utcnow() + datetime.timedelta(seconds=CFG.PAUSE_MAX_DURATION_SEC)
-                                await ctx.send(f"⏸️ {c_nick} 퍼즈! 최대 {CFG.PAUSE_MAX_DURATION_SEC//60}분. `!퍼즈 종료`로 조기 해제.")
+                                await ctx.send(f"⏸️ {self.mention_for_captain(c_nick)} 퍼즈! 최대 {CFG.PAUSE_MAX_DURATION_SEC//60}분. `!퍼즈 종료`로 조기 해제.")
                             action = None
                         else:
                             action = None
                     except asyncio.TimeoutError:
                         action, amount = "pass", None
-                        await ctx.send(f"⏱️ {c_nick} 시간 초과로 자동 패스.")
+                        await ctx.send(f"⏱️ {self.mention_for_captain(c_nick)} 시간 초과로 자동 패스.")
 
                 # ── 입력 결과 반영 ──
                 if action == "bid":
@@ -308,11 +308,11 @@ class AuctionService:
                         self.state.current_bid = bid
                         self.state.current_bidder = c_nick
                         passed_round = set()
-                        await ctx.send(f"🟢 {c_nick} **{bid}P** 입찰!")
+                        await ctx.send(f"🟢 {self.mention_for_captain(c_nick)} **{bid}P** 입찰!")
 
                 elif action == "pass":
                     passed_round.add(c_nick)
-                    await ctx.send(f"🔵 {c_nick} 패스.")
+                    await ctx.send(f"🔵 {self.mention_for_captain(c_nick)} 패스.")
 
                 # 다음 팀장 차례
                 self.state.current_captain_idx = (self.state.current_captain_idx + 1) % len(self.state.captain_order)
@@ -403,3 +403,10 @@ class AuctionService:
                 # 메시지 삭제/권한 변경 등으로 edit 실패 시 새로 보내고 계속
                 msg = await ctx.send(base + (f"⏳ {s}초 뒤 시작합니다! 준비해 주세요." if s > 0 else "▶️ **경매 시작!**"))
         return msg  # 마지막 메시지 객체 반환
+
+    # AuctionService 내부
+    def mention_for_captain(self, c_nick: str) -> str:
+        for uid, nick in self.state.captain_user_map.items():
+            if nick == c_nick:
+                return f"<@{uid}>"
+        return c_nick
