@@ -71,13 +71,9 @@ class AuctionService:
         self.state.reset_round()
 
     async def run_loop(self, ctx):
-        """전체 경매 루프
-        - 1라운드: 현재 player_order 그대로 진행
-        - 종료 후 유찰자가 있고 영입 가능한 팀이 1곳 이상이면 → 유찰자만 모아 재경매 1회
-        """
+        PREVIEW_DELAY_SEC = getattr(CFG, "PREVIEW_DELAY_SEC", getattr(CFG, "NEXT_PLAYER_DELAY_SEC", 5))
 
         def any_team_can_add() -> bool:
-            # 하나라도 추가 가능하면 True
             for c_nick in self.state.captains.keys():
                 team = self.state.teams.get(c_nick)
                 if team and team.can_add():
@@ -85,11 +81,9 @@ class AuctionService:
             return False
 
         async def play_round(round_title: str | None = None):
-            # 제목이 있을 때만 출력 (빈 문자열 전송 방지)
             if round_title:
                 await ctx.send(round_title)
 
-            # 현재 인덱스부터 끝까지 진행
             while self.state.current_player_idx + 1 < len(self.state.player_order):
                 self.state.current_player_idx += 1
                 p_nick = self.state.player_order[self.state.current_player_idx]
@@ -97,58 +91,58 @@ class AuctionService:
                 if not p or p.status != "대기":
                     continue
 
-                # 모든 팀이 만원이라면 자동 유찰
                 if not any_team_can_add():
                     p.status = "유찰"
                     await ctx.send(f"모든 팀이 만원이라 **{p.nickname}** 자동 유찰.")
                     continue
 
-                # 라운드 초기화 및 플레이어 시작 알림
+                # ── (1) 예고 + 카운트다운 ──
+                await self._preview_countdown(ctx, p, PREVIEW_DELAY_SEC)
+
+                # ── (2) 본 경매 시작 선언 & 라운드 초기화 ──
                 self.state.reset_round()
                 p.status = "진행"
                 await ctx.send(
-                    "다음 경매자!\n"
                     f"{fmt_player_line(p)}\n"
                     f"입찰 규칙: 최소 {CFG.BASE_BID}P, {CFG.BID_STEP}P 단위"
                 )
 
-                # 입찰 루프 실행
+                # ── (3) 실제 입찰 루프 (여기서 버튼/텍스트 입력 가능) ──
                 await self.bidding_loop(ctx, p)
 
-                # 전략 타임(모든 팀장 최소 1명 보유 시 1회)
+                # 전략 타임 (모든 팀 최소 1명 영입 시 1회)
                 if not self.state.strategy_called and self.state.everyone_has_member():
                     self.state.strategy_called = True
-                    await ctx.send(f"📣 모든 팀장에게 팀원이 1명 이상! 전략 타임 {CFG.STRATEGY_TIME_MINUTES}분 시작.")
+                    await ctx.send(f"📣 모든 팀장에게 팀원이 1명 이상! 전략 타임 {CFG.STRATEGY_TIME_MINUTES//60}분 시작.")
                     await asyncio.sleep(CFG.STRATEGY_TIME_MINUTES)
                     await ctx.send("전략 타임 종료, 경매 재개!")
 
-                # 다음 플레이어 전 대기
-                await asyncio.sleep(CFG.NEXT_PLAYER_DELAY_SEC)
+                # 라운드 간 간격(옵션)
+                gap = getattr(CFG, "POST_PLAYER_GAP_SEC", 0)
+                if gap > 0:
+                    await asyncio.sleep(gap)
 
-        # ── 1라운드 진행 ──
+        # ── 1라운드 ──
         if self.state.current_player_idx is None:
             self.state.current_player_idx = -1
         if self.state.current_captain_idx is None:
             self.state.current_captain_idx = 0
-        await play_round()  # 제목 없이 호출
+        await play_round()
 
         # ── 유찰자 재경매(1회) ──
-        failed_players = [p for p in self.state.players.values() if p.status == "유찰"]
+        failed_players = [pl for pl in self.state.players.values() if pl.status == "유찰"]
         if failed_players and any_team_can_add():
-            # 유찰자들을 대기로 되돌리고 새로운 순서 구성
-            for p in failed_players:
-                p.status = "대기"
-            self.state.player_order = [p.nickname for p in failed_players]
+            for pl in failed_players:
+                pl.status = "대기"
+            self.state.player_order = [pl.nickname for pl in failed_players]
             random.shuffle(self.state.player_order)
 
-            # 인덱스 초기화 및 라운드 상태 리셋
             self.state.current_player_idx = -1
             self.state.current_captain_idx = 0
             self.state.reset_round()
 
             await play_round("🔁 **유찰자 재경매 라운드 시작**")
 
-        # ── 종료 ──
         await ctx.send("✅ 모든 경매 종료. `!파일 내보내기`로 CSV를 받을 수 있어요.")
 
     async def bidding_loop(self, ctx, player: Player):
@@ -381,3 +375,21 @@ class AuctionService:
             if nick == captain_nick:
                 return uid
         return None
+
+    async def _preview_countdown(self, ctx, player, seconds: int):
+        """다음 경매자 예고 + 카운트다운 메시지 1개를 계속 수정"""
+        base = (
+            "📢 **다음 경매자 예고**\n"
+            f"{fmt_player_line(player)}\n"
+        )
+        # 처음 한 번 전송
+        msg = await ctx.send(base + f"⏳ {seconds}초 뒤 시작합니다! 준비해 주세요.")
+        # 1초마다 편집
+        for s in range(seconds - 1, -1, -1):
+            await asyncio.sleep(1)
+            try:
+                await msg.edit(content=base + (f"⏳ {s}초 뒤 시작합니다! 준비해 주세요." if s > 0 else "▶️ **경매 시작!**"))
+            except Exception:
+                # 메시지 삭제/권한 변경 등으로 edit 실패 시 새로 보내고 계속
+                msg = await ctx.send(base + (f"⏳ {s}초 뒤 시작합니다! 준비해 주세요." if s > 0 else "▶️ **경매 시작!**"))
+        return msg  # 마지막 메시지 객체 반환
