@@ -8,6 +8,14 @@ from utils.format import split_semicolon, fmt_player_line
 from services.auction_service import AuctionService
 import config as CFG
 
+from models.view_format import (
+    norm,
+    fmt_captain_line,
+    fmt_player_as_won,
+    fmt_player_as_other,
+    find_captain_key_by_teamname,
+)
+
 # 서비스는 모듈 전역에서 하나만 사용
 service = AuctionService()
 
@@ -349,42 +357,43 @@ class AuctionCog(commands.Cog, name="Auction"):
         if not team_name:
             return await ctx.send("사용법: `!조회 팀원 <팀명>`")
 
-        def norm(s: str) -> str:
-            return s.replace(" ", "").lower()
-
-        target = norm(team_name)
-        captain_key = None  # teams dict의 키는 '팀장 닉네임'
-
-        # 1) 팀명으로 팀장 찾기
-        for c_nick, cap in self.service.state.captains.items():
-            if norm(cap.team_name) == target:
-                captain_key = c_nick
-                break
-
-        # 2) 하위 호환: 사용자가 팀장 닉네임을 넣었을 수도 있음
-        if captain_key is None and team_name in self.service.state.teams:
-            captain_key = team_name
-
+        captain_key = find_captain_key_by_teamname(self.service, team_name)
         if captain_key is None:
             return await ctx.send("해당 팀명을 찾지 못했습니다. 팀명이 정확한지 확인해 주세요.")
 
+        cap = self.service.state.captains.get(captain_key)
         team = self.service.state.teams.get(captain_key)
-        if not team or not team.members:
-            return await ctx.send("팀원이 없습니다.")
+        if not cap or not team:
+            return await ctx.send("팀 정보를 찾지 못했습니다.")
 
-        lines = []
-        for mn in team.members:
-            p = self.service.state.players.get(mn)
-            if p:
-                lines.append(f"{p.nickname}({p.name}) — {p.won_price}P")
-        await ctx.send("\n".join(lines))
+        lines = [fmt_captain_line(captain_key, cap)]
 
-    @query_group.command(name="유찰자")
+        # 팀에 영입된 멤버(= 낙찰자만) 출력
+        if not team.members:
+            lines.append("낙찰 된 팀원: (없음)")
+        else:
+            for mn in team.members:
+                p = self.service.state.players.get(mn)
+                if p and getattr(p, "status", "") == "낙찰" and getattr(p, "won_team", "") == getattr(cap, "team_name", ""):
+                    lines.append(fmt_player_as_won(p))
+
+        text = "\n".join(lines)
+        await ctx.send(text[:1900] if text else "결과가 없습니다.")
+
+    @query_group.command(name="유찰자", aliases=["failed", "fail"])
     async def query_failed_sub(self, ctx: commands.Context):
-        failed = [p for p in self.service.state.players.values() if p.status == "유찰"]
+        """
+        !조회 유찰자
+        포맷: 그 외 경매자: 닉네임(이름) / 티어 / 주 라인 / 부 라인 (현 상태)
+        """
+        failed = [p for p in self.service.state.players.values() if getattr(p, "status", "") == "유찰"]
         if not failed:
             return await ctx.send("유찰자가 없습니다.")
-        await ctx.send("\n".join(f"{p.nickname}({p.name})" for p in failed))
+
+        from models.view_format import fmt_player_as_other
+        lines = [fmt_player_as_other(p) for p in failed]
+        text = "\n".join(lines)
+        await ctx.send(text[:1900])
 
     @query_group.command(name="포인트")
     async def query_point_sub(self, ctx: commands.Context, *, team_name: str | None = None):
@@ -397,125 +406,99 @@ class AuctionCog(commands.Cog, name="Auction"):
 
     @query_group.command(name="경매순서", aliases=["경매-순서", "경매_순서"])
     async def query_order(self, ctx: commands.Context):
-        if not self.service.state.player_order:
+        po = self.service.state.player_order
+        if not po:
             return await ctx.send("경매 순서가 없습니다.")
-        lines = []
-        for nick in self.service.state.player_order:
+
+        lines: list[str] = []
+        for nick in po:
             p = self.service.state.players.get(nick)
             if not p:
                 continue
-            line = f"{p.nickname}({p.name}) — {p.status}"
-            if p.status == "낙찰":
-                line += f" / {p.won_price}P"
-            lines.append(line)
+            if getattr(p, "status", "") == "낙찰":
+                lines.append(fmt_player_as_won(p))
+            else:
+                lines.append(fmt_player_as_other(p))
+
         text = "\n".join(lines)
         await ctx.send(text[:1900] if text else "경매 순서가 없습니다.")
+
         
     @query_group.command(name="참가자", aliases=["participant", "사람"])
     async def query_participant_sub(self, ctx: commands.Context, *, key: str | None = None):
-        """
-        사용법: !조회 참가자 <이름 또는 닉네임>
-        - 경매자: 이름, 닉네임, 현재상태(대기/진행/낙찰/유찰), 낙찰 시 포인트 표시
-        - 팀장: 이름, 닉네임(=등록 키), 상태=팀장, 팀명/포인트 요약 표시
-        """
         if not key:
             return await ctx.send("사용법: `!조회 참가자 <이름 또는 닉네임>`")
 
-        def norm(s: str) -> str:
-            return (s or "").strip().lower()
-
         q = norm(key)
 
-        # ── 1) 경매자 검색 ──
-        exact_player = None
-        exact_player_by_name = None
-        partial_players = []
-
+        # 1) 경매자 탐색
+        exact_p, exact_p_by_name = None, None
+        partial_p = []
         for p in self.service.state.players.values():
-            nick_l = norm(getattr(p, "nickname", ""))   # 안전 접근
+            nick_l = norm(getattr(p, "nickname", ""))
             name_l = norm(getattr(p, "name", ""))
             if nick_l == q:
-                exact_player = p
+                exact_p = p
                 break
-            if exact_player_by_name is None and name_l == q:
-                exact_player_by_name = p
+            if exact_p_by_name is None and name_l == q:
+                exact_p_by_name = p
             if q in nick_l or q in name_l:
-                partial_players.append(p)
+                partial_p.append(p)
 
-        # ── 2) 팀장 검색 ──
-        # captains 딕셔너리: key = 팀장닉(등록 시 사용), value = Captain 객체
-        exact_captain = None            # (c_nick, captain_obj) 튜플
-        exact_captain_by_name = None    # (c_nick, captain_obj)
-        partial_captains = []           # list[(c_nick, captain_obj)]
-
+        # 2) 팀장 탐색
+        exact_c, exact_c_by_name = None, None  # (c_nick, cap)
+        partial_c = []
         for c_nick, c in self.service.state.captains.items():
-            # Captain 객체 필드들 안전 접근
-            real_name_l = norm(getattr(c, "real_name", ""))
-            team_name_l = norm(getattr(c, "team_name", ""))
-            cap_nick_l  = norm(getattr(c, "nickname", ""))  # 모델에 nickname 필드가 있을 수도 있음
-            key_nick_l  = norm(c_nick)                       # 등록 키(팀장 닉네임)
-
-            # 닉네임 완전일치: 키/필드 모두 허용
+            real_l = norm(getattr(c, "real_name", ""))
+            team_l = norm(getattr(c, "team_name", ""))
+            cap_nick_l = norm(getattr(c, "nickname", ""))  # 모델에 있을 수도
+            key_nick_l = norm(c_nick)
             if key_nick_l == q or cap_nick_l == q:
-                exact_captain = (c_nick, c)
+                exact_c = (c_nick, c)
                 break
-            # 이름 완전일치
-            if exact_captain_by_name is None and real_name_l == q:
-                exact_captain_by_name = (c_nick, c)
-            # 부분일치(닉/이름/팀명)
-            if q in key_nick_l or q in cap_nick_l or q in real_name_l or q in team_name_l:
-                partial_captains.append((c_nick, c))
+            if exact_c_by_name is None and real_l == q:
+                exact_c_by_name = (c_nick, c)
+            if any(q in s for s in (real_l, team_l, cap_nick_l, key_nick_l)):
+                partial_c.append((c_nick, c))
 
-        # ── 출력 포맷 ──
-        def fmt_player_detail(p) -> str:
-            name = getattr(p, "name", "")
-            nick = getattr(p, "nickname", "")
-            status = getattr(p, "status", "대기")
-            base = f"이름:{name} | 닉네임:{nick} | 현재:{status}"
-            if status == "낙찰":
-                price = getattr(p, "won_price", None)
-                if price is not None:
-                    base += f" | 낙찰가:{price}P"
-            return base
+        lines: list[str] = []
 
-        def fmt_captain_detail(c_nick: str, c) -> str:
-            real_name = getattr(c, "real_name", "")
-            team_name = getattr(c, "team_name", "")
-            total = getattr(c, "total_pts", 0)
-            used  = getattr(c, "used_pts", 0)
-            remain = getattr(c, "remain_pts", total - used if total is not None and used is not None else 0)
-            return (
-                f"[팀장] 이름:{real_name} | 닉네임:{c_nick} | 팀명:{team_name} | "
-                f"포인트: 전체{total} / 사용{used} / 잔여{remain}"
-            )
-
-        # ── 우선순위로 결과 구성 ──
-        lines = []
-
-        # 1순위: 닉네임 완전일치
-        if exact_player:
-            lines.append(fmt_player_detail(exact_player))
-        if exact_captain:
-            lines.append(fmt_captain_detail(*exact_captain))
+        # 1순위: 닉 완전일치
+        if exact_p:
+            if getattr(exact_p, "status", "") == "낙찰":
+                lines.append(fmt_player_as_won(exact_p))
+            else:
+                lines.append(fmt_player_as_other(exact_p))
+        if exact_c:
+            lines.append(fmt_captain_line(exact_c[0], exact_c[1]))
 
         # 2순위: 이름 완전일치
-        if not lines and exact_player_by_name:
-            lines.append(fmt_player_detail(exact_player_by_name))
-        if not lines and exact_captain_by_name:
-            lines.append(fmt_captain_detail(*exact_captain_by_name))
+        if not lines and exact_p_by_name:
+            if getattr(exact_p_by_name, "status", "") == "낙찰":
+                lines.append(fmt_player_as_won(exact_p_by_name))
+            else:
+                lines.append(fmt_player_as_other(exact_p_by_name))
+        if not lines and exact_c_by_name:
+            lines.append(fmt_captain_line(exact_c_by_name[0], exact_c_by_name[1]))
 
-        # 3순위: 부분일치 후보 (최대 5개씩)
+        # 3순위: 부분일치 후보(최대 5개씩)
         if not lines:
-            if partial_players:
-                lines.extend(fmt_player_detail(p) for p in partial_players[:5])
-            if partial_captains:
-                lines.extend(fmt_captain_detail(cn, c) for cn, c in partial_captains[:5])
+            if partial_p:
+                for p in partial_p[:5]:
+                    if getattr(p, "status", "") == "낙찰":
+                        lines.append(fmt_player_as_won(p))
+                    else:
+                        lines.append(fmt_player_as_other(p))
+            if partial_c:
+                for cn, c in partial_c[:5]:
+                    lines.append(fmt_captain_line(cn, c))
 
         if not lines:
             return await ctx.send("해당 이름/닉네임의 참가자를 찾지 못했습니다.")
 
         text = "\n".join(lines)
         await ctx.send(text[:1900] if text else "결과가 없습니다.")
+
 
     # ───────────────────────── 결과 내보내기 ─────────────────────────
     @commands.command(name="파일")
