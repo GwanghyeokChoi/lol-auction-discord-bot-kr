@@ -10,6 +10,8 @@ class BidPanel(discord.ui.View):
     - 증감 버튼을 누를 때마다 '현재 입찰 금액' + '현재 최고가 대비 차이'가 갱신
     - 퍼즈 시 퍼즈 종료 버튼은 에페메랄로 표시
     - 인터랙션 응답은 중복 호출되지 않도록 edit_message/response 호출을 엄격히 분리
+    - '관심 없음' 추가: 이 매물에서 이후 차례도 자동 패스로 처리 (result: "no_interest")
+    버튼 표시는 '입찰 → 패스 → 관심 없음 → 퍼즈' 순서
     """
     def __init__(
         self,
@@ -32,7 +34,8 @@ class BidPanel(discord.ui.View):
         self.step = step
         self.max_bid = max_bid
         self.current_top = current_top or 0
-        self._amount = max(min_bid, (self.current_top + step) if self.current_top else min_bid)
+        # 최소 입찰: 현재 최고가보다 한 스텝 높은 값 또는 최소입찰
+        self._amount = max(min_bid, (self.current_top // step + 1) * step if self.current_top else min_bid)
 
         self.service = service
         self.captain_key = captain_key
@@ -40,21 +43,19 @@ class BidPanel(discord.ui.View):
         self.pause_max_count = pause_max_count
         self._result_future = result_future
 
-        # 에페메랄 패널의 "원본 메시지"를 편집하려면 original_response를 써야 함
+        # 에페메랄 최초 응답 여부 (이후엔 edit_original_response 사용)
         self._has_initial_responded = False
 
     # ─────────────────────────────────────────────
     async def on_timeout(self):
+        # 타임아웃 → 호출측에서 'pass' 처리하도록 result 전달
         if not self._result_future.done():
             self._result_future.set_result(("timeout", None))
 
-        # 뷰 비활성화 시도 (ephemeral이라도 edit_original_response로 가능)
+        # (선택) 버튼 비활성화 시도 — 에페메랄이라 실패할 수 있으므로 무시
         try:
-            if self._has_initial_responded:
-                msg = await self._get_original()
-                for c in self.children:
-                    c.disabled = True
-                await msg.edit(content=self.get_content(), view=self)
+            for c in self.children:
+                c.disabled = True
         except Exception:
             pass
 
@@ -93,20 +94,14 @@ class BidPanel(discord.ui.View):
         await interaction.response.send_message(self.get_content(), view=self, ephemeral=True)
         self._has_initial_responded = True
 
-    async def _get_original(self) -> discord.Message:
-        # 에페메랄도 original_response로 핸들 가능
-        return await self._interaction.followup.fetch_message(self._message_id)  # (미사용 패턴) → 아래 방식 사용
-
     async def _edit_panel(self, interaction: discord.Interaction):
         """
         버튼 클릭 시 현재 패널을 업데이트.
         - 최초 응답 이후에는 edit_original_response를 사용해야 안전.
         """
         if not interaction.response.is_done():
-            # 같은 인터랙션에서 아직 응답을 안했다면 이 인터랙션으로 바로 편집
             await interaction.response.edit_message(content=self.get_content(), view=self)
         else:
-            # 이미 응답된 인터랙션이라면 original을 편집
             await interaction.edit_original_response(content=self.get_content(), view=self)
 
     # ─────────────────────── 증감 버튼 ───────────────────────
@@ -143,22 +138,38 @@ class BidPanel(discord.ui.View):
     async def dec100(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._adjust_bid(interaction, -self.step * 10)
 
-    # ─────────────────────── 확정 / 패스 / 퍼즈 ───────────────────────
+    # ─────────────────────── 확정 / 패스 / 관심 없음 / 퍼즈 ───────────────────────
     @discord.ui.button(label="입찰", style=discord.ButtonStyle.success, row=2)
     async def do_confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         self._set_result("bid", self._amount)
+        # 패널 종료 메시지(에페메랄)
+        text = f"✅ 입찰 확정: **{self._amount}P**"
         if not interaction.response.is_done():
-            await interaction.response.edit_message(content=f"✅ 입찰 확정: **{self._amount}P**", view=None)
+            await interaction.response.edit_message(content=text, view=None)
         else:
-            await interaction.edit_original_response(content=f"✅ 입찰 확정: **{self._amount}P**", view=None)
+            await interaction.edit_original_response(content=text, view=None)
 
     @discord.ui.button(label="패스", style=discord.ButtonStyle.primary, row=2)
     async def do_pass(self, interaction: discord.Interaction, button: discord.ui.Button):
         self._set_result("pass", None)
+        text = "🔵 패스 선택"
         if not interaction.response.is_done():
-            await interaction.response.edit_message(content="🔵 패스 선택", view=None)
+            await interaction.response.edit_message(content=text, view=None)
         else:
-            await interaction.edit_original_response(content="🔵 패스 선택", view=None)
+            await interaction.edit_original_response(content=text, view=None)
+
+    @discord.ui.button(label="관심 없음", style=discord.ButtonStyle.secondary, row=2)
+    async def do_no_interest(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """
+        이 매물 동안은 영구 패스: 이후 내 차례가 돌아와도 자동 패스되도록 호출측에서 처리
+        (result: "no_interest")
+        """
+        self._set_result("no_interest", None)
+        text = "⚫ 관심 없음 선택 — 해당 경매는 앞으로 자동 패스됩니다."
+        if not interaction.response.is_done():
+            await interaction.response.edit_message(content=text, view=None)
+        else:
+            await interaction.edit_original_response(content=text, view=None)
 
     @discord.ui.button(label="퍼즈", style=discord.ButtonStyle.danger, row=2)
     async def do_pause(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -178,7 +189,13 @@ class BidPanel(discord.ui.View):
         cap.pause_used += 1
         state.pause_owner = self.captain_key
         state.paused_until = datetime.datetime.utcnow() + datetime.timedelta(seconds=self.pause_max_sec)
-        await interaction.channel.send(f"⏸️ {self.captain_key} 퍼즈! 최대 {self.pause_max_sec//60}분. `!퍼즈 종료`로 조기 해제.")
+        # 공개 채널 알림
+        try:
+            await interaction.channel.send(
+                f"⏸️ {self.captain_key} 퍼즈! 최대 {self.pause_max_sec//60}분. `!퍼즈 종료`로 조기 해제."
+            )
+        except Exception:
+            pass
 
         # 퍼즈 종료 버튼 (에페메랄)
         view = UnpauseView(author_id=self.author_id, service=self.service, captain_key=self.captain_key)

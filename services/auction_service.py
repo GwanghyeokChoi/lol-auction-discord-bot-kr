@@ -146,14 +146,12 @@ class AuctionService:
         await ctx.send("✅ 모든 경매 종료. `!파일 내보내기`로 CSV를 받을 수 있어요.")
 
     async def bidding_loop(self, ctx, player: Player):
-        """
-        - captain_user_map에 바인딩된 팀장(user_id)이 있으면 에페메랄 패널(런처→패널)로 입찰/패스/퍼즈
-        - 바인딩 없으면 텍스트 명령 폴백
-        - ✅ 현재 최고 입찰자에게 다시 턴이 오기 전에 자동 낙찰 처리
-        """
         import asyncio, datetime
-        from components.open_panel import OpenPanelLauncher
-        passed_round = set()
+        from models.entities import Team
+        import config as CFG
+
+        passed_round: set[str] = set()
+        no_interest_set: set[str] = set()   # ⬅️ 이 매물에 대해 “관심 없음”을 선택한 팀장들
 
         def get_user_id_for_captain(captain_nick: str) -> int | None:
             for uid, nick in self.state.captain_user_map.items():
@@ -165,18 +163,36 @@ class AuctionService:
             for _ in range(len(self.state.captain_order)):
                 c_nick = self.state.captain_order[self.state.current_captain_idx]
                 captain = self.state.captains[c_nick]
-                team = self.state.teams.get(c_nick)
-                if not team:
-                    team = Team(captain_nick=c_nick, limit=CFG.TEAM_LIMIT)
-                    self.state.teams[c_nick] = team
+                team = self.state.teams.get(c_nick) or Team(captain_nick=c_nick, limit=CFG.TEAM_LIMIT)
+                self.state.teams[c_nick] = team
 
-                # 팀 인원 제한 → 참여 스킵
+                # ⬇️ “관심 없음”이면 이 매물에서 자동 패스
+                if c_nick in no_interest_set:
+                    passed_round.add(c_nick)
+                    await ctx.send(f"⚫ {self.mention_for_captain(c_nick)} — ‘관심 없음’ 선택으로 자동 패스.")
+                    self.state.current_captain_idx = (self.state.current_captain_idx + 1) % len(self.state.captain_order)
+                    # 라운드 정산 체크
+                    if len(passed_round) == len(self.state.captain_order):
+                        if self.state.current_bidder:
+                            win = self.state.current_bidder
+                            cap = self.state.captains[win]; t = self.state.teams[win]
+                            cap.used_pts += self.state.current_bid
+                            t.members.append(player.nickname)
+                            player.status, player.won_team, player.won_price = "낙찰", cap.team_name, self.state.current_bid
+                            await ctx.send(f"🎉 **{player.nickname}** 낙찰! 팀 **{cap.team_name}**, 가격 **{self.state.current_bid}P**")
+                        else:
+                            player.status = "유찰"
+                            await ctx.send(f"⚪ **{player.nickname}** 유찰.")
+                        return
+                    continue
+
+                # 팀 인원 제한
                 if not team.can_add():
                     await ctx.send(f"{self.mention_for_captain(c_nick)} 팀은 인원 제한으로 이번 경매 참여 불가.")
                     self.state.current_captain_idx = (self.state.current_captain_idx + 1) % len(self.state.captain_order)
                     continue
 
-                # 퍼즈 만료 체크
+                # 퍼즈 만료 검사
                 if self.state.paused_until:
                     now = datetime.datetime.utcnow()
                     if now < self.state.paused_until:
@@ -186,118 +202,97 @@ class AuctionService:
                     self.state.pause_owner = None
                     await ctx.send("⏱️ 퍼즈 만료, 경매 재개.")
 
-                # 🔸(중요) 현재 최고 입찰자에게 턴이 다시 오면 자동 낙찰
-                if (
-                    self.state.current_bidder  # 누군가 이미 입찰했고
-                    and self.state.current_bidder == c_nick  # 그가 지금 차례이며
-                    and len(passed_round) == len(self.state.captain_order) - 1  # 나를 제외한 모두가 패스/타임아웃
-                ):
+                # 현재 최고 입찰자에게 턴이 다시 오면 자동 낙찰
+                if self.state.current_bidder == c_nick and len(passed_round) == len(self.state.captain_order) - 1:
                     win = self.state.current_bidder
-                    cap = self.state.captains[win]
-                    t = self.state.teams[win]
+                    cap = self.state.captains[win]; t = self.state.teams[win]
                     cap.used_pts += self.state.current_bid
                     t.members.append(player.nickname)
-                    player.status = "낙찰"
-                    player.won_team = cap.team_name
-                    player.won_price = self.state.current_bid
+                    player.status, player.won_team, player.won_price = "낙찰", cap.team_name, self.state.current_bid
                     await ctx.send(f"🎉 **{player.nickname}** 낙찰! 팀 **{cap.team_name}**, 가격 **{self.state.current_bid}P**")
                     return
 
-                # ── 한 턴 입력 수집 ──
+                # ── 입력 수집 ──
                 action, amount = None, None
                 author_id = get_user_id_for_captain(c_nick)
 
                 if author_id is not None:
-                    # 에페메랄 패널 런처 사용
+                    # 버튼(에페메랄) 모드
+                    from components.open_panel import OpenPanelLauncher
                     loop = asyncio.get_running_loop()
-                    result_future = loop.create_future()
-                    launcher = OpenPanelLauncher(
-                        author_id=author_id,
-                        service=self,
-                        captain_key=c_nick,
-                        min_bid=CFG.BASE_BID,
-                        step=CFG.BID_STEP,
-                        max_bid=captain.remain_pts,
-                        current_top=self.state.current_bid,
-                        timeout_sec=CFG.TURN_BID_TIMEOUT_SEC,
-                        pause_max_sec=CFG.PAUSE_MAX_DURATION_SEC,
-                        pause_max_count=CFG.PAUSE_MAX_PER_CAPTAIN,
-                        result_future=result_future,
-                    )
-                    prompt_msg = await ctx.send(
-                        f"배팅 차례: {self.mention_for_captain(c_nick)} (잔여 {captain.remain_pts}) — 아래 버튼으로 ‘본인만’ 에페메랄 패널을 열 수 있습니다.",
-                        view=launcher
-                    )
-                    try:
-                        action, amount = await asyncio.wait_for(result_future, timeout=CFG.TURN_BID_TIMEOUT_SEC)
-                    except asyncio.TimeoutError:
-                        action, amount = "pass", None
-                        await ctx.send(f"⏱️ {self.mention_for_captain(c_nick)} 시간 초과로 자동 패스.")
-                    # 런처 비활성
-                    try:
-                        for ch in launcher.children:
-                            ch.disabled = True
-                        await prompt_msg.edit(view=launcher)
-                    except Exception:
-                        pass
+                    if not getattr(self.state, "current_result_future", None) or self.state.current_result_future.done():
+                        self.state.current_result_future = loop.create_future()
+                    result_future = self.state.current_result_future
+
+                    if getattr(self.state, "resume_panel_requested", False):
+                        self.state.resume_panel_requested = False
+                        try:
+                            action, amount = await asyncio.wait_for(result_future, timeout=CFG.TURN_BID_TIMEOUT_SEC)
+                        except asyncio.TimeoutError:
+                            action = "pass"; await ctx.send(f"⏱️ {self.mention_for_captain(c_nick)} 시간 초과로 자동 패스.")
+                    else:
+                        launcher = OpenPanelLauncher(
+                            author_id=author_id, service=self, captain_key=c_nick,
+                            min_bid=CFG.BASE_BID, step=CFG.BID_STEP, max_bid=captain.remain_pts,
+                            current_top=self.state.current_bid, timeout_sec=CFG.TURN_BID_TIMEOUT_SEC,
+                            pause_max_sec=CFG.PAUSE_MAX_DURATION_SEC, pause_max_count=CFG.PAUSE_MAX_PER_CAPTAIN,
+                            result_future=result_future,
+                            # ⬇️ 새 액션 이름도 패널이 반환할 수 있게 그대로 전달 (패널 코드는 아래 B)
+                        )
+                        prompt = await ctx.send(
+                            f"배팅 차례: {self.mention_for_captain(c_nick)} (잔여 {captain.remain_pts}) — 버튼으로 선택하세요.",
+                            view=launcher
+                        )
+                        try:
+                            action, amount = await asyncio.wait_for(result_future, timeout=CFG.TURN_BID_TIMEOUT_SEC)
+                        except asyncio.TimeoutError:
+                            action = "pass"; await ctx.send(f"⏱️ {self.mention_for_captain(c_nick)} 시간 초과로 자동 패스.")
+                        try:
+                            for ch in launcher.children: ch.disabled = True
+                            await prompt.edit(view=launcher)
+                        except Exception:
+                            pass
+                    self.state.current_result_future = None
 
                 else:
                     # 텍스트 폴백
                     await ctx.send(
                         f"배팅 차례: {self.mention_for_captain(c_nick)} (잔여 {captain.remain_pts}) — "
-                        f"`!입찰 <포인트>` / `!패스` / `!퍼즈` ({CFG.TURN_BID_TIMEOUT_SEC}초)\n"
-                        "※ `!팀장 연결 <팀장닉네임>`으로 바인딩하면 버튼(에페메랄) UI를 사용할 수 있어요."
+                        f"`!입찰 <포인트>` / `!패스` / `!관심없음` / `!퍼즈` ({CFG.TURN_BID_TIMEOUT_SEC}초)"
                     )
-
-                    def is_turn_message(m: discord.Message) -> bool:
-                        if m.channel.id != ctx.channel.id:
-                            return False
+                    def is_turn(m): 
+                        if m.channel.id != ctx.channel.id: return False
                         mapped = self.state.captain_user_map.get(m.author.id)
-                        if mapped:
-                            return mapped == c_nick
-                        name = (m.author.display_name or "").strip()
-                        uname = (m.author.name or "").strip()
-                        return name == c_nick or uname == c_nick
-
+                        if mapped: return mapped == c_nick
+                        n=(m.author.display_name or "").strip(); u=(m.author.name or "").strip()
+                        return n==c_nick or u==c_nick
                     try:
-                        msg = await ctx.bot.wait_for("message", timeout=CFG.TURN_BID_TIMEOUT_SEC, check=is_turn_message)
+                        msg = await ctx.bot.wait_for("message", timeout=CFG.TURN_BID_TIMEOUT_SEC, check=is_turn)
                         content = msg.content.strip()
                         if content.startswith("!입찰"):
                             parts = content.split()
-                            if len(parts) >= 2 and parts[1].lstrip("-").isdigit():
-                                amount = int(parts[1]); action = "bid"
+                            if len(parts)>=2 and parts[1].lstrip("-").isdigit():
+                                amount=int(parts[1]); action="bid"
                             else:
-                                await ctx.send("예) `!입찰 100`"); action = None
-                        elif content.startswith("!패스"):
-                            action = "pass"
+                                await ctx.send("예) `!입찰 100`")
+                        elif content in ("!패스", "!pass"):
+                            action="pass"
+                        elif content.replace(" ", "") in ("!관심없음", "!관심없어", "!nointerest"):
+                            action="no_interest"
                         elif content.startswith("!퍼즈 종료"):
                             if self.state.pause_owner == c_nick:
-                                self.state.paused_until = None
-                                self.state.pause_owner = None
+                                self.state.paused_until=None; self.state.pause_owner=None
                                 await ctx.send("▶️ 퍼즈 해제!")
                             else:
                                 await ctx.send("퍼즈를 건 팀장만 해제할 수 있습니다.")
-                            action = None
                         elif content.startswith("!퍼즈"):
-                            if self.state.pause_owner and self.state.pause_owner != c_nick:
-                                await ctx.send("이미 누군가 퍼즈 중입니다.")
-                            elif captain.pause_used >= CFG.PAUSE_MAX_PER_CAPTAIN:
-                                await ctx.send("퍼즈 횟수를 모두 사용했습니다.")
-                            else:
-                                captain.pause_used += 1
-                                self.state.pause_owner = c_nick
-                                self.state.paused_until = datetime.datetime.utcnow() + datetime.timedelta(seconds=CFG.PAUSE_MAX_DURATION_SEC)
-                                await ctx.send(f"⏸️ {self.mention_for_captain(c_nick)} 퍼즈! 최대 {CFG.PAUSE_MAX_DURATION_SEC//60}분. `!퍼즈 종료`로 조기 해제.")
-                            action = None
-                        else:
-                            action = None
+                            action="pause"
                     except asyncio.TimeoutError:
-                        action, amount = "pass", None
-                        await ctx.send(f"⏱️ {self.mention_for_captain(c_nick)} 시간 초과로 자동 패스.")
+                        action="pass"; await ctx.send(f"⏱️ {self.mention_for_captain(c_nick)} 시간 초과로 자동 패스.")
 
-                # ── 입력 결과 반영 ──
+                # ── 결과 반영 ──
                 if action == "bid":
-                    bid = int(amount or 0)
+                    bid=int(amount or 0)
                     if bid < CFG.BASE_BID or bid % CFG.BID_STEP != 0:
                         await ctx.send(f"입찰은 최소 {CFG.BASE_BID}P, {CFG.BID_STEP}P 단위입니다.")
                     elif bid <= self.state.current_bid:
@@ -305,35 +300,45 @@ class AuctionService:
                     elif bid > captain.remain_pts:
                         await ctx.send(f"보유 포인트({captain.remain_pts})를 초과했어요.")
                     else:
-                        self.state.current_bid = bid
-                        self.state.current_bidder = c_nick
-                        passed_round = set()
+                        self.state.current_bid, self.state.current_bidder = bid, c_nick
+                        passed_round.clear()
                         await ctx.send(f"🟢 {self.mention_for_captain(c_nick)} **{bid}P** 입찰!")
 
                 elif action == "pass":
                     passed_round.add(c_nick)
                     await ctx.send(f"🔵 {self.mention_for_captain(c_nick)} 패스.")
 
-                # 다음 팀장 차례
+                elif action == "no_interest":
+                    passed_round.add(c_nick)
+                    no_interest_set.add(c_nick)   # ⬅️ 다음에 또 차례가 와도 자동 패스
+                    await ctx.send(f"⚫ {self.mention_for_captain(c_nick)} 관심 없음(현재 경매 패스).")
+
+                elif action == "pause":
+                    if self.state.pause_owner and self.state.pause_owner != c_nick:
+                        await ctx.send("이미 누군가 퍼즈 중입니다.")
+                    elif captain.pause_used >= CFG.PAUSE_MAX_PER_CAPTAIN:
+                        await ctx.send("퍼즈 횟수를 모두 사용했습니다.")
+                    else:
+                        captain.pause_used += 1
+                        self.state.pause_owner = c_nick
+                        self.state.paused_until = datetime.datetime.utcnow() + datetime.timedelta(seconds=CFG.PAUSE_MAX_DURATION_SEC)
+                        await ctx.send(f"⏸️ {self.mention_for_captain(c_nick)} 퍼즈! 최대 {CFG.PAUSE_MAX_DURATION_SEC//60}분. `!퍼즈 종료`로 조기 해제.")
+
+                # 다음 팀장
                 self.state.current_captain_idx = (self.state.current_captain_idx + 1) % len(self.state.captain_order)
 
-                # ✅ 일반 정산: 모두 패스 + 최고 입찰자 없음 → 유찰
-                if len(passed_round) == len(self.state.captain_order) and not self.state.current_bidder:
-                    player.status = "유찰"
-                    await ctx.send(f"⚪ **{player.nickname}** 유찰.")
-                    return
-
-                # ✅ 일반 정산: 누군가 입찰했고, 그 이후 모두 패스 → 낙찰
-                if len(passed_round) == len(self.state.captain_order) and self.state.current_bidder:
-                    win = self.state.current_bidder
-                    cap = self.state.captains[win]
-                    t = self.state.teams[win]
-                    cap.used_pts += self.state.current_bid
-                    t.members.append(player.nickname)
-                    player.status = "낙찰"
-                    player.won_team = cap.team_name
-                    player.won_price = self.state.current_bid
-                    await ctx.send(f"🎉 **{player.nickname}** 낙찰! 팀 **{cap.team_name}**, 가격 **{self.state.current_bid}P**")
+                # 라운드 정산
+                if len(passed_round) == len(self.state.captain_order):
+                    if self.state.current_bidder:
+                        win = self.state.current_bidder
+                        cap = self.state.captains[win]; t = self.state.teams[win]
+                        cap.used_pts += self.state.current_bid
+                        t.members.append(player.nickname)
+                        player.status, player.won_team, player.won_price = "낙찰", cap.team_name, self.state.current_bid
+                        await ctx.send(f"🎉 **{player.nickname}** 낙찰! 팀 **{cap.team_name}**, 가격 **{self.state.current_bid}P**")
+                    else:
+                        player.status = "유찰"
+                        await ctx.send(f"⚪ **{player.nickname}** 유찰.")
                     return
 
     def export_csv_bytes(self) -> bytes:
