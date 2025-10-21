@@ -64,8 +64,8 @@ class AuctionCog(commands.Cog, name="Auction"):
                 "전체 명령어 요약 또는 특정 토픽의 상세 도움말을 보여줍니다."
             ),
             "팀장 등록": (
-                "!팀장 등록 팀명;이름;닉;티어;주;부;모스트1[;모스트2][;모스트3]",
-                "팀장을 등록합니다. 모스트2/3는 비워도 됩니다."
+                "!팀장 등록 팀명;이름;닉;티어;주;부;모스트1[;모스트2][;모스트3][;초기포인트]",
+                "팀장을 등록합니다. 모스트2/3, 초기포인트는 비워도 됩니다."
             ),
             "팀장 연결": (
                 "!팀장 연결 <팀장닉네임>",
@@ -210,19 +210,23 @@ class AuctionCog(commands.Cog, name="Auction"):
     @commands.command(name="팀장")
     async def captain_cmd(self, ctx: commands.Context, *raw_args):
         """
-        !팀장 등록 팀명;이름;닉;티어;주;부;모스트1[;모스트2][;모스트3]
-        !팀장 연결 <팀장닉네임>
+        사용법:
+        • !팀장 등록 팀명;이름;닉;티어;주;부;모스트1[;모스트2][;모스트3][;초기포인트]
+        • !팀장 연결 <팀장닉네임>  — 내 디스코드 계정을 팀장 닉에 바인딩(버튼 UI 사용)
+        비고:
+        - 초기포인트는 선택 항목입니다(0 이상 정수). 지정 시 해당 팀장에게 우선 적용됩니다.
+        - 지정하지 않은 팀장만 !경매 시작 <팀장초기포인트>의 기본값을 받습니다.
         """
         if not raw_args:
             return await ctx.send(
                 "사용법:\n"
-                "• `!팀장 등록 팀명;이름;닉;티어;주;부;모스트1[;모스트2][;모스트3]`\n"
+                "• `!팀장 등록 팀명;이름;닉;티어;주;부;모스트1[;모스트2][;모스트3][;초기포인트]`\n"
                 "• `!팀장 연결 <팀장닉네임>` — 내 디스코드 계정을 팀장 닉에 바인딩(버튼 UI 사용)"
             )
 
-        sub = raw_args[0]
+        sub = raw_args[0].strip()
 
-        # ───────── 연결 (바인딩) ─────────
+        # ───────── 연결(바인딩) ─────────
         if sub in ("연결", "bind"):
             captain_nick = " ".join(raw_args[1:]).strip() if len(raw_args) > 1 else None
             if not captain_nick:
@@ -240,18 +244,61 @@ class AuctionCog(commands.Cog, name="Auction"):
         if sub != "등록":
             return await ctx.send(
                 "사용법:\n"
-                "• `!팀장 등록 팀명;이름;닉;티어;주;부;모스트1[;모스트2][;모스트3]`\n"
+                "• `!팀장 등록 팀명;이름;닉;티어;주;부;모스트1[;모스트2][;모스트3][;초기포인트]`\n"
                 "• `!팀장 연결 <팀장닉네임>`"
             )
 
         payload = " ".join(raw_args[1:]).strip()
+        if not payload:
+            return await ctx.send(
+                "사용법: `!팀장 등록 팀명;이름;닉;티어;주;부;모스트1[;모스트2][;모스트3][;초기포인트]`"
+            )
+
         try:
-            parts = split_semicolon(payload, expected_min=7, expected_max=9)
-            team_name, real_name, nick, tier, main_p, sub_p, m1, m2, m3 = parts
-            self.service.add_captain(team_name, real_name, nick, tier, main_p, sub_p, m1, m2, m3)
+            # 최대 10개(모스트2/3, 초기포인트까지) 허용
+            parts = split_semicolon(payload, expected_min=7, expected_max=10)
+            # 필수 7개
+            team_name, real_name, nick, tier, main_p, sub_p, m1 = [p.strip() for p in parts[:7]]
+            # 선택 항목
+            m2 = parts[7].strip() if len(parts) > 7 and parts[7] is not None else None
+            m3 = parts[8].strip() if len(parts) > 8 and parts[8] is not None else None
+            init_raw = parts[9].strip() if len(parts) > 9 and parts[9] is not None else None
+
+            # 초기 포인트 파싱(선택)
+            init_pts = None
+            if init_raw not in (None, ""):
+                try:
+                    init_pts = int(init_raw)
+                    if init_pts < 0:
+                        raise ValueError
+                except Exception:
+                    return await ctx.send("초기 포인트는 0 이상의 정수여야 합니다.")
+
+            # 등록
+            self.service.add_captain(
+                team_name=team_name,
+                real_name=real_name,
+                nick=nick,
+                tier=tier,
+                main_p=main_p,
+                sub_p=sub_p,
+                m1=m1,
+                m2=m2,
+                m3=m3,
+                init_pts=init_pts,  # ← 추가된 개별 초기 포인트
+            )
+
+        except ValueError as e:
+            # 서비스/유틸에서 올라온 명확한 에러 메시지 우선 노출
+            return await ctx.send(str(e))
         except Exception:
             return await ctx.send("형식을 확인해 주세요. 세미콜론(;) 기준 항목 수/순서를 맞춰주세요.")
-        await ctx.send(f"팀장 등록 완료: **{team_name}** / {real_name} {nick}")
+
+        # 안내 메시지
+        if init_pts is not None:
+            await ctx.send(f"팀장 등록 완료: **{team_name}** / {nick}  (초기 포인트: {init_pts}P)")
+        else:
+            await ctx.send(f"팀장 등록 완료: **{team_name}** / {nick}")
 
     @commands.command(name="경매자")
     async def player_cmd(self, ctx: commands.Context, *raw_args):

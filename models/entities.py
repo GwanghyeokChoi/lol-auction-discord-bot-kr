@@ -24,16 +24,17 @@ class Captain:
     tier: str
     main_pos: str
     sub_pos: str
-    most1: str
-    most2: Optional[str] = None
-    most3: Optional[str] = None
+    most1: str | None = None
+    most2: str | None = None
+    most3: str | None = None
+
     total_pts: int = 0
     used_pts: int = 0
     pause_used: int = 0
 
     @property
     def remain_pts(self) -> int:
-        return self.total_pts - self.used_pts
+        return max(0, (self.total_pts or 0) - (self.used_pts or 0))
 
 @dataclass
 class Team:

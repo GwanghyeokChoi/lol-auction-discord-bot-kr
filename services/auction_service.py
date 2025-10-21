@@ -26,13 +26,27 @@ class AuctionService:
             self.state.channel_id = channel_id
         return self.state.channel_id == channel_id
 
-    def add_captain(self, team_name, real_name, nick, tier, main_p, sub_p, m1, m2=None, m3=None, team_limit=None):
-        m1 = norm_optional(m1)
-        m2 = norm_optional(m2)
-        m3 = norm_optional(m3)
+    def add_captain(
+        self,
+        team_name, real_name, nick, tier, main_p, sub_p, m1, m2=None, m3=None,
+        init_pts: int | None = None,  # ⬅️ 추가: 개별 초기 포인트
+        team_limit: int | None = None
+    ):
+        m1 = norm_optional(m1); m2 = norm_optional(m2); m3 = norm_optional(m3)
         if not (team_name and real_name and nick and tier and main_p and sub_p and m1):
             raise ValueError("필수 항목 누락")
-        self.state.captains[nick] = Captain(team_name, real_name, nick, tier, main_p, sub_p, m1, m2, m3)
+
+        # 팀장 생성
+        cap = Captain(team_name, real_name, nick, tier, main_p, sub_p, m1, m2, m3)
+
+        # 개별 초기 포인트가 주어졌으면 우선 세팅
+        if init_pts is not None:
+            if not isinstance(init_pts, int) or init_pts < 0:
+                raise ValueError("초기 포인트는 0 이상의 정수여야 합니다.")
+            cap.total_pts = init_pts
+            cap.used_pts = 0  # 신규 등록이므로 0
+
+        self.state.captains[nick] = cap
         self.state.teams[nick] = Team(captain_nick=nick, limit=team_limit or CFG.TEAM_LIMIT)
 
     def add_player(self, name, nick, tier, main_p, sub_p, m1, m2=None, m3=None):
@@ -55,11 +69,14 @@ class AuctionService:
         self.state.started = True
         self.state.channel_id = channel_id
 
+        # ⬇️ 개별 포인트가 지정되지 않은 팀장에게만 기본 초기 포인트 적용
         for c in self.state.captains.values():
-            c.total_pts = initial_points
+            if not isinstance(c.total_pts, int) or c.total_pts <= 0:
+                c.total_pts = initial_points
             c.used_pts = 0
             c.pause_used = 0
 
+        # 이후 순서/플레이어 셔플 로직은 기존 그대로
         self.state.captain_order = list(self.state.captains.keys())
         random.shuffle(self.state.captain_order)
 
